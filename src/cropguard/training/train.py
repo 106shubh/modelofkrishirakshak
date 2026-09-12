@@ -90,12 +90,56 @@ def train(
     # Setup model
     model = build_model(cfg, num_classes=len(TAXONOMY.classes)).to(device)
 
-    # Loss and optimizer (§1: label smoothing — 0 keeps the old behavior)
+    # Loss (§1: label smoothing — 0 keeps the old behavior)
     criterion = nn.CrossEntropyLoss(label_smoothing=cfg.eval.label_smoothing)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.training.lr)
+
+    # §3.2 two-stage fine-tuning. Optimizer is REBUILT at each stage boundary —
+    # requires_grad changes and per-group LRs both demand fresh groups.
+    #   stage "frozen":  backbone.requires_grad = False (fusion + head only)
+    #   stage "last":    last backbone block unfrozen at lr * 0.25, head at lr
+    #   stage "full":    everything trainable; backbone at lr * unfreeze_lr_factor
+    freeze_epochs = min(cfg.training.freeze_epochs, cfg.training.epochs)
+
+    def _stage_of(epoch: int) -> str:
+        if epoch < freeze_epochs:
+            return "frozen"
+        if epoch < freeze_epochs + max(1, cfg.training.epochs // 3):
+            return "last"
+        return "full"
+
+    def _optimizer_for(stage: str) -> torch.optim.AdamW:
+        lr = cfg.training.lr
+        if stage == "frozen":
+            model.freeze_backbone()
+            # Head/fusion params only — the backbone is grad-less now.
+            trainable = [p for p in model.parameters() if p.requires_grad]
+            return torch.optim.AdamW(trainable, lr=lr, weight_decay=cfg.training.weight_decay)
+        if stage == "last":
+            model.unfreeze_backbone()
+            model.freeze_backbone()
+            model.unfreeze_last_block()
+            head = [p for p in model.parameters() if p.requires_grad and not _in_backbone(model, p)]
+            return torch.optim.AdamW(
+                [{"params": head, "lr": lr}]
+                + model.backbone_param_groups(lr, 0.25),
+                weight_decay=cfg.training.weight_decay,
+            )
+        model.unfreeze_backbone()
+        return torch.optim.AdamW(
+            [{"params": [p for p in model.parameters() if not _in_backbone(model, p)], "lr": lr}]
+            + model.backbone_param_groups(lr, cfg.training.unfreeze_lr_factor),
+            weight_decay=cfg.training.weight_decay,
+        )
+
+    def _in_backbone(m: nn.Module, p: torch.Tensor) -> bool:
+        return any(p is bp for bp in m.backbone.parameters())
+
+    stage = _stage_of(start_epoch) if resume_from and resume_from.exists() else _stage_of(0)
+    optimizer = _optimizer_for(stage)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg.training.epochs
     )
+    log.info("Stage schedule: freeze_epochs=%d → %s", freeze_epochs, "frozen→last→full")
 
     # Resume from checkpoint if provided
     start_epoch = 0
@@ -123,6 +167,16 @@ def train(
 
     # Training loop
     for epoch in range(start_epoch, cfg.training.epochs):
+        # §3.2 stage transitions: rebuild optimizer when the schedule moves.
+        new_stage = _stage_of(epoch)
+        if new_stage != stage:
+            stage = new_stage
+            optimizer = _optimizer_for(stage)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=cfg.training.epochs
+            )
+            log.info("Stage → %s (epoch %d): optimizer rebuilt", stage, epoch + 1)
+
         # Train phase
         model.train()
         train_loss = 0.0

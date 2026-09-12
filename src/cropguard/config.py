@@ -81,6 +81,11 @@ class TrainingConfig(BaseModel):
     seed: int = 42
     log_every: int = 20
     out_dir: Path = PROJECT_ROOT / "checkpoints"
+    # §3.2 two-stage fine-tuning: epochs with the backbone frozen (fusion +
+    # head only), then gradual unfreeze (last block at lr * 0.25, full at
+    # lr * unfreeze_lr_factor). 0 = train everything from epoch 1 (legacy).
+    freeze_epochs: int = 0
+    unfreeze_lr_factor: float = 0.1
 
 
 class EvalConfig(BaseModel):
@@ -154,6 +159,10 @@ class Config(BaseModel):
             raise ValueError(f"Unknown pest_detector: {self.model.pest_detector}")
         if self.model.pest_detector == "yolo" and not self.inference.pest_weights:
             raise ValueError("model.pest_detector=yolo requires inference.pest_weights")
+        if self.training.freeze_epochs < 0:
+            raise ValueError("training.freeze_epochs must be >= 0")
+        if not 0 < self.training.unfreeze_lr_factor <= 1:
+            raise ValueError("training.unfreeze_lr_factor must be in (0, 1]")
         return self
 
     def to_dict(self) -> dict[str, Any]:

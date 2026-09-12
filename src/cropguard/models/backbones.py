@@ -89,3 +89,54 @@ class FeatureBackbone(nn.Module):
         if features_only:
             return f
         return self.dropout(f)
+
+    # ------------------------------------------------------------------ #
+    # §3.2 two-stage fine-tuning: freeze/unfreeze schedule primitives
+    # ------------------------------------------------------------------ #
+
+    def _blocks(self) -> list[nn.Module]:
+        """Progressive blocks, input-side → output-side. The LAST block is the
+        first one unfrozen in stage 2."""
+        if hasattr(self.net, "features"):
+            return list(self.net.features)
+        return [self.net]  # opaque backbones: all-or-nothing granularity
+
+    def freeze_all(self) -> None:
+        """Stage 1: backbone fully frozen — only fusion + head receive grads."""
+        for p in self.net.parameters():
+            p.requires_grad = False
+
+    def unfreeze_last_block(self) -> None:
+        """Stage 2a: unfreeze only the final block (gradual unfreeze)."""
+        blocks = self._blocks()
+        if len(blocks) <= 1:
+            return  # opaque: leave all-frozen until full unfreeze
+        for p in blocks[-1].parameters():
+            p.requires_grad = True
+
+    def unfreeze_all(self) -> None:
+        """Stage 2b: full unfreeze."""
+        for p in self.net.parameters():
+            p.requires_grad = True
+
+    def trainable_param_groups(
+        self, base_lr: float, unfreeze_lr_factor: float
+    ) -> list[dict]:
+        """Optimizer param groups honoring the two-stage LRs: newly unfrozen
+        last block trains at ``base_lr * 0.25``, everything else trainable at
+        ``base_lr * unfreeze_lr_factor`` (spec §3.2)."""
+        blocks = self._blocks()
+        last_block_params = (
+            {id(p) for p in blocks[-1].parameters()} if len(blocks) > 1 else set()
+        )
+        groups: dict[str, list] = {"last": [], "rest": []}
+        for p in self.net.parameters():
+            if not p.requires_grad:
+                continue
+            groups["last" if id(p) in last_block_params else "rest"].append(p)
+        out = []
+        if groups["last"]:
+            out.append({"params": groups["last"], "lr": base_lr * 0.25})
+        if groups["rest"]:
+            out.append({"params": groups["rest"], "lr": base_lr * unfreeze_lr_factor})
+        return out

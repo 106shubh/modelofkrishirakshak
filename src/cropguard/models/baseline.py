@@ -39,3 +39,16 @@ class BaselineClassifier(nn.Module):
     def feature_forward(self, image: torch.Tensor) -> torch.Tensor:
         """Return the feature vector for Grad-CAM / severity head usage."""
         return self.backbone(image)
+
+    # §3.2 two-stage fine-tuning surface (delegates to FeatureBackbone).
+    def freeze_backbone(self) -> None:
+        self.backbone.freeze_all()
+
+    def unfreeze_last_block(self) -> None:
+        self.backbone.unfreeze_last_block()
+
+    def unfreeze_backbone(self) -> None:
+        self.backbone.unfreeze_all()
+
+    def backbone_param_groups(self, base_lr: float, unfreeze_lr_factor: float) -> list[dict]:
+        return self.backbone.trainable_param_groups(base_lr, unfreeze_lr_factor)

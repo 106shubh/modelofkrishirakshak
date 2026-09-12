@@ -36,6 +36,8 @@ training:
   seed: 42
   log_every: 20
   out_dir: checkpoints
+  freeze_epochs: 0           # §3.2: epochs with backbone frozen before gradual unfreeze (0 = off)
+  unfreeze_lr_factor: 0.1    # §3.2: full-unfreeze LR = lr * this (last block gets lr * 0.25)
 
 eval:
   confidence_threshold: 0.65
