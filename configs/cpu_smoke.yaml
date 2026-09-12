@@ -1,0 +1,22 @@
+# Fast CPU smoke config: tiny images, few images, few steps.
+# Usage: cropguard-train --config configs/cpu_smoke.yaml
+
+data:
+  image_size: 96
+  train_subset_per_class: 8
+  workers: 0
+
+model:
+  backbone: efficientnet_b0
+  pretrained: false   # skip weight download for offline smoke runs
+
+training:
+  batch_size: 8
+  epochs: 1
+  max_steps: 10
+  amp: "off"
+  log_every: 2
+  out_dir: checkpoints/smoke
+
+eval:
+  mc_dropout_samples: 2

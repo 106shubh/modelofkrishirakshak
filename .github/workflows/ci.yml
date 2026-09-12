@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # CPU-only torch wheels (~200MB) — the default Linux wheels bundle CUDA
+      # libs (~2.5GB). Installing first satisfies pyproject's torch>=2.4 /
+      # torchvision>=0.19 so the project install doesn't re-pull them.
+      - name: Install CPU torch
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install project
+        run: pip install -e ".[dev]"
+
+      # Suite is offline-safe by construction: tests pin weather.provider=synthesize
+      # (conftest), the demo-seed test passes --skip-live, and models are built
+      # with pretrained=False so nothing downloads weights.
+      - name: Run offline test suite
+        run: python -m pytest tests/

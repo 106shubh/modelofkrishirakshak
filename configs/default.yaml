@@ -1,0 +1,67 @@
+# CropGuard default configuration (SIH26131)
+# Override any value via CLI (--set section.key=value) or env (CROPGUARD_SECTION__KEY).
+
+data:
+  root: data/raw/PlantVillage   # contains color/ grayscale/ segmented/ (or class folders)
+  variant: color            # color | grayscale | segmented
+  image_size: 192
+  train_subset_per_class: 300  # null = use all; int = cap per class (fast CPU runs)
+  val_subset_per_class: null   # null = use the whole val split
+  val_ratio: 0.20
+  workers: 2
+  min_samples_per_class: 30
+  duplicate_threshold: 0.05
+  field_root: null             # §1: PlantDoc-style field split root (null = skip)
+
+model:
+  backbone: efficientnet_b0  # efficientnet_b0/b1, convnext_tiny, vit_b_16, swin_t
+  pretrained: true
+  dropout: 0.2
+  fusion: gated              # gated | concat | image_only
+  context_dim: 128
+  freeze_backbone: false
+  pest_detector: "off"       # §1 pest head: off | heuristic (offline stand-in) | yolo
+
+training:
+  batch_size: 32
+  epochs: 8
+  max_steps: null
+  lr: 0.0003
+  weight_decay: 0.0001
+  warmup_epochs: 1
+  scheduler: cosine
+  early_stopping_patience: 3
+  grad_accum: 1
+  amp: auto                  # auto | on | off
+  seed: 42
+  log_every: 20
+  out_dir: checkpoints
+
+eval:
+  confidence_threshold: 0.65
+  ood_energy_threshold: null
+  severity_bands: [0.34, 0.67]
+  mc_dropout_samples: 10
+  ood_abstain: true
+  temperature: null          # null → fitted on val logits at train time (MVP-6)
+  calibration_split: val     # NFR5: switch to a field split when one exists
+  label_smoothing: 0.0       # §1: classifier loss smoothing (0 disables)
+  novelty:                   # §2: embedding-space novelty detection
+    enabled: false
+    k: 5
+    threshold: null          # null → fitted at train time, stamped into ckpt
+
+inference:
+  mode: local                # local | remote
+  host: 0.0.0.0
+  port: 8100
+  checkpoint: null           # null → best_model.pth in training.out_dir
+  remote_url: ""
+  max_image_bytes: 15728640  # 15 MB
+  pest_weights: null         # §1: YOLOv8 .pt path, required when pest_detector=yolo
+
+weather:
+  provider: synthesize       # open-meteo (no key) | imd (needs api_key) | synthesize
+  api_key: null              # IMD credential; or env CROPGUARD_WEATHER__API_KEY
+  timeout_sec: 10.0
+  cache_ttl_sec: 3600        # Redis TTL per taluka+time-bucket (FR3/NFR2)

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cropguard"
+version = "0.1.0"
+description = "Causal, abstention-aware crop disease & pest diagnosis for SIH26131 (Govt of Maharashtra)"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "opencv-python-headless",
+    "pillow",
+    "matplotlib",
+    "seaborn",
+    "pyyaml",
+    "pydantic>=2",
+    "pydantic-settings",
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "httpx",
+    "redis>=5",  # optional at runtime: only imported when REDIS_URL is set
+    "tqdm",
+    "huggingface_hub",
+]
+
+[project.scripts]
+cropguard-train = "cropguard.training.train:main"
+cropguard-evaluate = "cropguard.training.evaluate:main"
+cropguard-predict = "cropguard.training.predict:main"
+cropguard-serve = "cropguard.inference.service:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

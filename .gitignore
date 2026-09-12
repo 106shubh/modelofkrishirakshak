@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+
+# Data (large binaries — never commit)
+data/
+*.zip
+*.tar.gz
+
+# Model artifacts
+checkpoints/
+runs/
+*.pt
+*.pth
+*.onnx
+
+# Reports / plots
+reports/
+*.png
+
+# Env / secrets
+.env
+*.local
+
+# Logs
+*.log
+logs/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Nested independent git repos (local agent tooling)
+ECC/
+ponytail/
