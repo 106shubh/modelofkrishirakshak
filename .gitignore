@@ -7,8 +7,9 @@ build/
 dist/
 .venv/
 
-# Data (large binaries — never commit)
-data/
+# Data (large binaries — never commit; root-anchored so the
+# src/cropguard/data/ source package is NOT matched)
+/data/
 *.zip
 *.tar.gz
 
