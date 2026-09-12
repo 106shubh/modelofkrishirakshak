@@ -87,14 +87,21 @@ def _metrics_over_loader(
     loader: DataLoader,
     device: torch.device,
     threshold: float,
-) -> dict[str, float]:
-    """Accuracy / loss / abstention over one loader (shared by both splits)."""
+) -> dict:
+    """Accuracy / loss / abstention over one loader, plus a per-crop breakdown.
+
+    §20: per-crop numbers are required, not optional — an aggregate hides a
+    minority crop collapsing behind the volume of data-rich crops. ``per_crop``
+    keys are crop names via TAXONOMY; ``worst_crop`` is the minimum-accuracy
+    crop (the number the training spec gates checkpointing on).
+    """
     model.eval()
     criterion = nn.CrossEntropyLoss()
     loss_sum = 0.0
     correct = 0
     total = 0
     abstained = 0
+    per_crop: dict[int, list[int]] = {}  # crop_id → [correct, total]
 
     with torch.no_grad():
         for batch in loader:
@@ -109,30 +116,46 @@ def _metrics_over_loader(
             )
             loss_sum += criterion(outputs["logits"], targets).item()
             max_prob, predicted = outputs["probs"].max(1)
+            hits = predicted.eq(targets)
             total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
+            correct += hits.sum().item()
             abstained += (max_prob < threshold).sum().item()
+            for cid, ok in zip(batch["crop_id"].tolist(), hits.tolist()):
+                acc = per_crop.setdefault(cid, [0, 0])
+                acc[0] += ok
+                acc[1] += 1
 
+    crop_metrics = {
+        TAXONOMY.crop_name(cid): {
+            "accuracy": 100.0 * c / max(n, 1),
+            "n": n,
+        }
+        for cid, (c, n) in sorted(per_crop.items())
+    }
+    worst = min(crop_metrics.items(), key=lambda kv: kv[1]["accuracy"], default=None)
     return {
         "accuracy": 100.0 * correct / max(total, 1),
         "loss": loss_sum / max(len(loader), 1),
         "abstain_rate": abstained / max(total, 1),
         "n": total,
+        "per_crop": crop_metrics,
+        "worst_crop": None if worst is None else {"crop": worst[0], **worst[1]},
     }
 
 
 def evaluate(
     cfg: Config,
     checkpoint: Path | None = None,
-) -> dict[str, float]:
+) -> dict:
     """Evaluate the model, reporting lab-condition and field-condition splits
-    SEPARATELY (§1 acceptance criterion: a blended number that hides the
-    domain gap is exactly what the abstention design exists to manage).
+    SEPARATELY (§1 acceptance criterion), each with a per-crop breakdown
+    (§20: minority-crop performance must never hide inside an average).
 
     Returns:
-        dict with lab_* metrics always, field_* metrics when data.field_root
-        points at an existing dataset directory, plus "domain_gap" (field −
-        lab accuracy) when both exist.
+        dict with lab_* metrics always (plus lab_per_crop / lab_worst_crop),
+        field_* metrics + field_per_crop / field_worst_crop + "domain_gap"
+        (field − lab accuracy) when data.field_root points at an existing
+        dataset directory.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info(f"Using device: {device}")
@@ -160,7 +183,13 @@ def evaluate(
         "Lab-condition — Loss: %(loss).4f, Acc: %(accuracy).2f%%, Abstention: %(abstain_rate).2f%% (n=%(n)d)",
         lab,
     )
-    results = {f"lab_{k}": v for k, v in lab.items()}
+    for crop, m in lab["per_crop"].items():
+        log.info("  lab %-12s acc=%6.2f%% (n=%d)", crop, m["accuracy"], m["n"])
+    results: dict = {
+        f"lab_{k}": v for k, v in lab.items() if k not in {"per_crop", "worst_crop"}
+    }
+    results["lab_per_crop"] = lab["per_crop"]
+    results["lab_worst_crop"] = lab["worst_crop"]
 
     # Field-condition split (PlantDoc-style / curated field images)
     if cfg.data.field_root is not None and Path(cfg.data.field_root).exists():
@@ -174,7 +203,11 @@ def evaluate(
             "Field-condition — Loss: %(loss).4f, Acc: %(accuracy).2f%%, Abstention: %(abstain_rate).2f%% (n=%(n)d)",
             field,
         )
-        results.update({f"field_{k}": v for k, v in field.items()})
+        results.update(
+            {f"field_{k}": v for k, v in field.items() if k not in {"per_crop", "worst_crop"}}
+        )
+        results["field_per_crop"] = field["per_crop"]
+        results["field_worst_crop"] = field["worst_crop"]
         results["domain_gap"] = field["accuracy"] - lab["accuracy"]
         log.info("Domain gap (field − lab): %+.2f points", results["domain_gap"])
     else:
