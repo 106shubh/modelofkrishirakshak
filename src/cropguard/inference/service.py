@@ -598,6 +598,17 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     return app
 
+# Expose global ASGI app for deployment via uvicorn
+try:
+    from pathlib import Path
+    from ..config import load_config
+    _demo_cfg = load_config(Path("configs/demo.yaml"))
+except Exception as e:
+    import logging
+    logging.warning(f"Could not load demo.yaml config: {e}")
+    _demo_cfg = None
+
+app = create_app(_demo_cfg)
 
 def main() -> None:
     """Run the FastAPI service."""
