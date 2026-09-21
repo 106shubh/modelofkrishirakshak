@@ -1,0 +1,27 @@
+inference:
+  checkpoint: null
+
+training:
+  out_dir: checkpoints/v2s_finetuned
+  epochs: 1
+  batch_size: 16
+  lr: 0.0005
+  weight_decay: 0.01
+  samples_per_class: 40
+
+eval:
+  novelty:
+    enabled: false
+  confidence_threshold: 0.65
+  margin_threshold: 0.10
+
+data:
+  root: data/raw/PlantVillage/raw
+  image_size: 224
+  train_subset_per_class: 10
+
+model:
+  backbone: efficientnet_v2_s
+  pretrained: false
+  dropout: 0.3
+  fusion: gated

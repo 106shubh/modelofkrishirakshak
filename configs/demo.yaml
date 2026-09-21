@@ -1,6 +1,9 @@
 # SIH demo config: real trained model + live weather.
 # Run: python -m cropguard.inference.service --config configs/demo.yaml
 #
+# SIH demo config: real trained model + live weather.
+# Run: python -m cropguard.inference.service --config configs/demo.yaml
+#
 # Differences from default.yaml:
 #   - inference.checkpoint -> the trained v2s_real checkpoint
 #     (efficientnet_v2_s, 3 epochs on PlantVillage, val acc 98.2%,
@@ -12,3 +15,10 @@ inference:
 
 weather:
   provider: open-meteo
+
+eval:
+  novelty:
+    enabled: false
+
+data:
+  root: data/raw/PlantVillage/raw

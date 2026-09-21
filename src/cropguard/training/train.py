@@ -134,13 +134,6 @@ def train(
     def _in_backbone(m: nn.Module, p: torch.Tensor) -> bool:
         return any(p is bp for bp in m.backbone.parameters())
 
-    stage = _stage_of(start_epoch) if resume_from and resume_from.exists() else _stage_of(0)
-    optimizer = _optimizer_for(stage)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=cfg.training.epochs
-    )
-    log.info("Stage schedule: freeze_epochs=%d → %s", freeze_epochs, "frozen→last→full")
-
     # Resume from checkpoint if provided
     start_epoch = 0
     best_val_acc = 0.0
@@ -148,11 +141,19 @@ def train(
         log.info(f"Resuming from {resume_from}")
         checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        start_epoch = checkpoint["epoch"] + 1
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        start_epoch = checkpoint.get("epoch", -1) + 1
         best_val_acc = checkpoint.get("best_val_acc", -1.0)
         log.info(f"Resumed from epoch {start_epoch}")
+
+    stage = _stage_of(start_epoch)
+    optimizer = _optimizer_for(stage)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=cfg.training.epochs
+    )
 
     # AMP / scheduler / early stopping
     use_amp_flag = use_amp(cfg.training.amp)

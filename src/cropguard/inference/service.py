@@ -59,6 +59,18 @@ class PredictRequest(BaseModel):
 
 
 class PredictResponse(BaseModel):
+    # --- New Structured Schema ---
+    crop: str = ""
+    diagnosis: dict[str, Any] = Field(default_factory=dict)
+    image_quality: dict[str, Any] = Field(default_factory=dict)
+    severity_info: dict[str, Any] = Field(default_factory=dict) 
+    explainability: dict[str, Any] = Field(default_factory=dict)
+    environmental_risk: dict[str, Any] = Field(default_factory=dict)
+    regional_context: dict[str, Any] = Field(default_factory=dict)
+    recommendation: dict[str, Any] = Field(default_factory=dict)
+    abstention: dict[str, Any] = Field(default_factory=dict)
+
+    # --- Backward Compatibility ---
     class_name: str
     confidence: float
     severity: str
@@ -152,6 +164,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     from .rules import CausalRuleLayer
     from .engine import ModelRouter, SeverityEngine, temperature_scale
     from .stubs import fetch_regional_history
+    from .quality import assess_image_quality
+    from .explain import explain_prediction
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -243,6 +257,12 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @app.post("/predict", response_model=PredictResponse)
     def predict(request: PredictRequest) -> PredictResponse:
+        try:
+            return _predict_inner(request)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+            
+    def _predict_inner(request: PredictRequest) -> PredictResponse:
         if not app.state.ready:
             raise HTTPException(status_code=503, detail="Model not loaded")
 
@@ -271,6 +291,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             pil_image = PILImage.open(io.BytesIO(image_raw)).convert("RGB")
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid image: {e}") from e
+            
+        # [NEW] Image Quality Check
+        quality_res = assess_image_quality(pil_image)
 
         transform = eval_transform(cfg.data.image_size)
         image_tensor = transform(pil_image).unsqueeze(0).to(device)
@@ -290,16 +313,25 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         stage_t = torch.tensor([stage_index(stage)], dtype=torch.long).to(device)
         region_t = torch.tensor([region_index(region)], dtype=torch.long).to(device)
         weather_t = weather_vec.to_tensor().unsqueeze(0).to(device)
+        
+        model_kwargs = {
+            "type_hint": request.type_hint,
+            "crop_id": crop_t,
+            "stage_idx": stage_t,
+            "region_idx": region_t,
+            "weather": weather_t
+        }
 
         with torch.no_grad():
-            output = router.predict(
-                image_tensor,
-                type_hint=request.type_hint,
-                crop_id=crop_t,
-                stage_idx=stage_t,
-                region_idx=region_t,
-                weather=weather_t,
-            )
+            output = router.predict(image_tensor, **model_kwargs)
+
+        # Variables for the new response format
+        margin = 0.0
+        top_alternatives = []
+        is_novel = False
+        activated_ratio = None
+        predicted_idx = 0
+        probs_dict = {}
 
         # NFR4: the router may return classifier output (38-class logits) OR
         # detector output (detections list) — handle both tails explicitly.
@@ -309,8 +341,6 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             class_name = top.class_name if top else "no_detection"
             confidence = top.confidence if top else 0.0
             probs = None
-            # Detector classes live outside the PlantVillage taxonomy; 0 =
-            # "unclassified pest finding" until the backend adds their rows.
             pest_disease_id = 0
         else:
             # MVP-6: temperature-scaled confidence (T fitted at train time).
@@ -318,9 +348,37 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 temperature_scale(output["logits"], temperature=app.state.temperature), dim=-1
             )[0]
             max_prob, predicted = probs.max(0)
-            class_name = TAXONOMY.classes[predicted.item()]
+            predicted_idx = predicted.item()
+            class_name = TAXONOMY.classes[predicted_idx]
             confidence = max_prob.item()
             pest_disease_id = TAXONOMY.pest_disease_id(class_name)
+            
+            # [NEW] Calculate margin and top alternatives
+            sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+            if len(sorted_probs) > 1:
+                margin = (sorted_probs[0] - sorted_probs[1]).item()
+                
+            for i in range(1, min(4, len(sorted_probs))):
+                alt_class_name = TAXONOMY.classes[sorted_indices[i].item()]
+                top_alternatives.append({
+                    "disease": alt_class_name,
+                    "probability": round(sorted_probs[i].item(), 4)
+                })
+                
+            probs_dict = {
+                TAXONOMY.classes[i]: round(p.item(), 4)
+                for i, p in enumerate(probs)
+            }
+            
+        # [NEW] Explainability via Grad-CAM
+        explainability = {"method": "None", "available": False, "reason": "No detector active."}
+        if detections_out is None and class_name != "no_detection":
+            explainability = explain_prediction(
+                router, image_tensor, pil_image, predicted_idx, **model_kwargs
+            )
+            activated_ratio = explainability.get("activated_ratio")
+            if "activated_ratio" in explainability:
+                del explainability["activated_ratio"]
 
         # FR5: Causal rule layer
         rule_res = rules.evaluate(crop_id, weather_vec, stage, class_name)
@@ -333,8 +391,16 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             severity_tier, severity_score = severity_engine.calculate(
                 class_name, raw_severity=raw_severity
             )
+            severity_basis = ["Calculated from object detection bounding box coverage"]
+        elif activated_ratio is not None:
+            # [NEW] Decouple disease severity from confidence using Grad-CAM activation
+            severity_tier, severity_score = severity_engine.calculate(
+                class_name, raw_severity=activated_ratio
+            )
+            severity_basis = ["Calculated from Grad-CAM activation heatmap area"]
         else:
             severity_tier, severity_score = severity_engine.calculate(class_name, confidence)
+            severity_basis = ["Calculated using confidence proxy (requires visual assessment)"]
 
         # FR6: Escalation & Abstention logic
         # Rule layer high risk flags can force escalation even if model is confident
@@ -345,10 +411,38 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         history_count = fetch_regional_history(app.state.detections, region, pest_disease_id)
         cold_start = history_count == 0
 
+        # §2: novelty check — embedding-space distance from every known-class
+        # cluster. A genuinely different escalation reason from low confidence.
+        if app.state.novelty is not None and output.get("features") is not None:
+            try:
+                is_novel = app.state.novelty.is_novel(output["features"][0].cpu())
+            except Exception as e:
+                log.warning("Novelty check failed (treating as in-distribution): %s", e)
+
+        # [NEW] Abstention logic incorporates margin and image quality
+        min_conf = getattr(cfg.eval, "min_confidence", 0.65)
+        min_margin = getattr(cfg.eval, "min_margin", 0.10)
+        
+        is_low_conf = (confidence < min_conf) or (margin < min_margin)
+        is_poor_quality = quality_res["status"] == "poor"
+
+        abstain = is_low_conf or force_escalate or is_novel or is_poor_quality
+        
+        # Precedence when several triggers fire
+        if is_poor_quality:
+            escalation_reason = "poor_image_quality"
+        elif is_novel:
+            escalation_reason = "novel_presentation"
+        elif force_escalate:
+            escalation_reason = "rule_high_risk"
+        elif abstain:
+            escalation_reason = "low_confidence_or_margin"
+        else:
+            escalation_reason = None
+            
         # Issue 4: rule-vs-model precedence — a flagged rule layer always attaches
         # its advisory to the farmer result, even when the model is confident and
-        # no escalation happens. This is what keeps early-stage weather-driven
-        # risk visible before the vision model has anything to see.
+        # no escalation happens.
         advisories: list[str] = []
         if rule_res.flagged:
             advisory = f"Rule layer advisory ({rule_res.risk_tier} risk): {rule_res.reason}"
@@ -360,39 +454,68 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 f"No regional detection history for {region} in the last 7 days — "
                 "assessment based on image and weather only"
             )
-
-        # §2: novelty check — embedding-space distance from every known-class
-        # cluster. A genuinely different escalation reason from low confidence.
-        is_novel = False
-        if app.state.novelty is not None and output.get("features") is not None:
-            try:
-                is_novel = app.state.novelty.is_novel(output["features"][0].cpu())
-            except Exception as e:
-                log.warning("Novelty check failed (treating as in-distribution): %s", e)
-
-        abstain = (
-            (cfg.eval.confidence_threshold is not None and confidence < cfg.eval.confidence_threshold)
-            or force_escalate
-            or is_novel
-        )
-        # Precedence when several triggers fire: novel beats rule beats low-conf,
-        # because "matches nothing we know" is the most actionable information
-        # for the officer reviewing the queue.
-        escalation_reason = (
-            "novel_presentation"
-            if is_novel
-            else "rule_high_risk"
-            if force_escalate
-            else "low_confidence"
-            if abstain
-            else None
-        )
         if is_novel:
             advisories.append(
                 "Image does not match any known class in the model — routed to an officer for review"
             )
 
+        # [NEW] Construct detailed JSON blocks
+        crop_name = CROPS.get(crop_id, "Unknown").capitalize()
+        
+        disease_name = class_name.split("___")[-1].replace("_", " ") if "___" in class_name else class_name
+        diagnosis = {
+            "disease": disease_name,
+            "confidence": round(confidence, 4),
+            "confidence_percent": round(confidence * 100, 2),
+            "top_alternatives": top_alternatives,
+            "margin": round(margin, 4),
+            "reliable": not (is_low_conf or is_novel)
+        }
+        
+        severity_info = {
+            "level": severity_tier,
+            "score": round(severity_score, 4),
+            "basis": severity_basis,
+            "confidence": "moderate" if activated_ratio is not None else "low"
+        }
+        
+        environmental_risk = {
+            "tier": rule_res.risk_tier,
+            "factors": rule_res.contributing_factors,
+            "interpretation": rule_res.reason if rule_res.flagged else "Environmental conditions do not pose a severe risk."
+        }
+        
+        regional_context = {
+            "available": not cold_start,
+            "history_count": history_count,
+            "message": f"Recorded {history_count} occurrences in {region} over the past 7 days." if not cold_start else f"No regional detection history available for {region}."
+        }
+        
+        recommendation = {
+            "status": "inspection_required" if abstain else "advisory",
+            "actions": [
+                "Schedule a field inspection or consult a local agricultural officer." if abstain else "Monitor the crop closely and consider preventive IPM strategies.",
+                "Avoid aggressive chemical treatment until diagnosis is confirmed visually." if abstain else f"Review regional guidelines for treating {disease_name}."
+            ]
+        }
+        
+        abstention_details = {
+            "required": bool(abstain),
+            "reason": escalation_reason
+        }
+
         return PredictResponse(
+            crop=crop_name,
+            diagnosis=diagnosis,
+            image_quality=quality_res,
+            severity_info=severity_info,
+            explainability=explainability,
+            environmental_risk=environmental_risk,
+            regional_context=regional_context,
+            recommendation=recommendation,
+            abstention=abstention_details,
+            
+            # Backwards compatibility fields
             class_name=class_name,
             confidence=round(confidence, 4),
             severity=severity_tier,
@@ -400,12 +523,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             abstain=bool(abstain),
             escalation_reason=escalation_reason,
             advisories=advisories,
-            probabilities={
-                TAXONOMY.classes[i]: round(p.item(), 4)
-                for i, p in enumerate(probs)
-            }
-            if probs is not None
-            else {},
+            probabilities=probs_dict,
             pest_disease_id=pest_disease_id,
             detections=[
                 {
@@ -463,8 +581,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 status_code=413,
                 detail=f"Image exceeds {app.state.config.inference.max_image_bytes} bytes",
             )
-        return predict(
-            PredictRequest(
+        from pydantic import ValidationError
+        try:
+            req = PredictRequest(
                 image_bytes=contents,
                 crop_id=crop_id,
                 stage=stage,
@@ -472,7 +591,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 month=month,
                 context_hash=hashlib.sha256(contents).hexdigest(),
             )
-        )
+        except ValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+            
+        return predict(req)
 
     return app
 

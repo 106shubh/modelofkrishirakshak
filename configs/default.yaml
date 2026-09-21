@@ -41,6 +41,8 @@ training:
 
 eval:
   confidence_threshold: 0.65
+  min_confidence: 0.65
+  min_margin: 0.10
   ood_energy_threshold: null
   severity_bands: [0.34, 0.67]
   mc_dropout_samples: 10
